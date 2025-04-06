@@ -1,108 +1,116 @@
 const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
 const app = express();
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const { v4: uuidv4 } = require('uuid'); // Used to generate user and exercise IDs
+const path = require('path'); // Required to resolve file paths
 
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
-app.use(cors({ optionsSuccessStatus: 200 }));
+// Middleware
+app.use(cors());
 app.use(express.static('public'));
+app.use(bodyParser.urlencoded({ extended: true }));
 
-mongoose.connect(process.env.MONGO_URI, { 
-  useNewUrlParser: true, 
-  useUnifiedTopology: true 
+// In-memory data storage (you can replace it with a database like MongoDB)
+let users = [];
+let exercises = [];
+
+// Serve the index.html file located in the views folder
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'views', 'index.html'));
 });
 
-const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  log: [{
-    description: String,
-    duration: Number,
-    date: Date
-  }]
-});
-
-const User = mongoose.model('User', userSchema);
-
-// Create new user
-app.post('/api/users', async (req, res) => {
-  try {
-    const newUser = new User({ username: req.body.username });
-    await newUser.save();
-    res.json({ username: newUser.username, _id: newUser._id });
-  } catch (err) {
-    res.status(400).json(err.code === 11000 ? 
-      { error: 'Username already taken' } : 
-      { error: 'Invalid username' });
+// Route to create a new user
+app.post('/api/users', (req, res) => {
+  const username = req.body.username;
+  if (!username) {
+    return res.status(400).send('Username is required');
   }
+  
+  const user = {
+    username: username,
+    _id: uuidv4(),
+  };
+  users.push(user);
+  
+  res.json(user);
 });
 
-// Get all users
-app.get('/api/users', async (req, res) => {
-  res.json(await User.find({}, 'username _id'));
+// Route to get all users
+app.get('/api/users', (req, res) => {
+  res.json(users);
 });
 
-// Add exercise
-app.post('/api/users/:_id/exercises', async (req, res) => {
-  try {
-    const user = await User.findById(req.params._id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+// Route to add an exercise for a specific user
+app.post('/api/users/:_id/exercises', (req, res) => {
+  const userId = req.params._id;
+  const { description, duration, date } = req.body;
+  
+  if (!description || !duration) {
+    return res.status(400).send('Description and duration are required');
+  }
+  
+  // Check if user exists
+  const user = users.find(u => u._id === userId);
+  if (!user) {
+    return res.status(404).send('User not found');
+  }
+  
+  const exercise = {
+    _id: uuidv4(),
+    description: description,
+    duration: parseInt(duration),
+    date: date ? new Date(date).toDateString() : new Date().toDateString(),
+  };
 
-    const exercise = {
-      description: req.body.description,
-      duration: parseInt(req.body.duration),
-      date: req.body.date ? new Date(req.body.date) : new Date()
-    };
+  // Save the exercise
+  exercises.push({ userId, exercise });
 
-    if (isNaN(exercise.date)) exercise.date = new Date();
-    user.log.push(exercise);
-    await user.save();
+  // Return the user with the added exercise
+  user.exercises = user.exercises || [];
+  user.exercises.push(exercise);
+  
+  res.json(user);
+});
 
-    res.json({
-      _id: user._id,
-      username: user.username,
-      date: exercise.date.toDateString(),
-      duration: exercise.duration,
-      description: exercise.description
+// Route to get exercise logs for a specific user
+app.get('/api/users/:_id/logs', (req, res) => {
+  const userId = req.params._id;
+  const { from, to, limit } = req.query;
+
+  // Check if user exists
+  const user = users.find(u => u._id === userId);
+  if (!user) {
+    return res.status(404).send('User not found');
+  }
+
+  let userExercises = user.exercises || [];
+
+  // Filter by date range if provided
+  if (from || to) {
+    const fromDate = from ? new Date(from) : null;
+    const toDate = to ? new Date(to) : null;
+
+    userExercises = userExercises.filter(exercise => {
+      const exerciseDate = new Date(exercise.date);
+      return (!fromDate || exerciseDate >= fromDate) && (!toDate || exerciseDate <= toDate);
     });
-  } catch (err) {
-    res.status(400).json({ error: 'Invalid data' });
   }
+
+  // Limit the number of logs
+  if (limit) {
+    userExercises = userExercises.slice(0, parseInt(limit));
+  }
+
+  // Return the user with the filtered logs and count
+  res.json({
+    username: user.username,
+    count: userExercises.length,
+    _id: user._id,
+    log: userExercises,
+  });
 });
 
-// Get exercise log
-app.get('/api/users/:_id/logs', async (req, res) => {
-  try {
-    const user = await User.findById(req.params._id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    let log = user.log.map(ex => ({
-      description: ex.description,
-      duration: ex.duration,
-      date: ex.date.toDateString()
-    }));
-
-    // Apply filters
-    if (req.query.from) {
-      const fromDate = new Date(req.query.from);
-      if (!isNaN(fromDate)) log = log.filter(ex => new Date(ex.date) >= fromDate);
-    }
-    if (req.query.to) {
-      const toDate = new Date(req.query.to);
-      if (!isNaN(toDate)) log = log.filter(ex => new Date(ex.date) <= toDate);
-    }
-    if (req.query.limit) log = log.slice(0, parseInt(req.query.limit));
-
-    res.json({
-      _id: user._id,
-      username: user.username,
-      count: log.length,
-      log
-    });
-  } catch (err) {
-    res.status(400).json({ error: 'Invalid request' });
-  }
+// Start the server
+const listener = app.listen(process.env.PORT || 3000, () => {
+  console.log('Your app is listening on port ' + listener.address().port);
 });
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on ${PORT}`));
